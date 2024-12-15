@@ -37,7 +37,7 @@ __forceinline__ __device__ float fast_ex2_ftz_f32(float x)
 	return y;
 }
 
-__forceinline__ __device__ void pixel_shader(float3& C, float& T, float2 pixf, float2 xy, float4 con_o, float3 rgb)
+__forceinline__ __device__ void pixel_shader(float4& C, float& T, float2 pixf, float2 xy, float4 con_o, float4 rgbd)
 {
 	float2 d = { xy.x - pixf.x, xy.y - pixf.y };
 	//float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
@@ -45,9 +45,10 @@ __forceinline__ __device__ void pixel_shader(float3& C, float& T, float2 pixf, f
 	float alpha;
 	asm volatile("ex2.approx.ftz.f32 %0, %1;" : "=f"(alpha) : "f"(power));
 	//alpha = min(0.99f, alpha);
-	C.x += rgb.x * (alpha * T);
-	C.y += rgb.y * (alpha * T);
-	C.z += rgb.z * (alpha * T);
+	C.x += rgbd.x * (alpha * T);
+	C.y += rgbd.y * (alpha * T);
+	C.z += rgbd.z * (alpha * T);
+	C.w += rgbd.w * (alpha * T);
 	T -= alpha * T;
 }
 
@@ -56,8 +57,8 @@ __forceinline__ __device__ uint8_t encode(float x)
 	return (uint8_t)min(max(0.0f, x * 255.0f), 255.0f);
 }
 
-__forceinline__ __device__ uint8_t write_color(uchar3* __restrict__ out_color,
-	float3 bg_color, int2 pix, int width, int height, float3 C, float T)
+__forceinline__ __device__ uint8_t write_color(uchar3* __restrict__ out_color, float* __restrict__ out_depth,
+	float3 bg_color, int2 pix, int width, int height, float4 C, float T)
 {
 	if (pix.x < width && pix.y < height)
 	{
@@ -69,6 +70,7 @@ __forceinline__ __device__ uint8_t write_color(uchar3* __restrict__ out_color,
 		out_color[pix_id].x = encode(C.x + T * bg_color.x);
 		out_color[pix_id].y = encode(C.y + T * bg_color.y);
 		out_color[pix_id].z = encode(C.z + T * bg_color.z);
+		out_depth[pix_id]   = C.w;  // no bg color for depth
 	}
 }
 
@@ -177,16 +179,17 @@ struct render_load_info
 	}
 };
 
-__forceinline__ __device__ void get_gaussian_features(float2& xy, float3& rgb, float4& con_o, float buf, int offset)
+__forceinline__ __device__ void get_gaussian_features(float2& xy, float4& rgbd, float4& con_o, float buf, int offset)
 {
 	xy = {
 		__shfl_sync(~0, buf, 8 + offset),
 		__shfl_sync(~0, buf, 9 + offset)
 	};
-	rgb = {
+	rgbd = {
 		__shfl_sync(~0, buf, 16 + offset),
 		__shfl_sync(~0, buf, 17 + offset),
-		__shfl_sync(~0, buf, 18 + offset)
+		__shfl_sync(~0, buf, 18 + offset),
+		__shfl_sync(~0, buf, 19 + offset),
 	};
 	con_o = {
 		__shfl_sync(~0, buf, 24 + offset),
@@ -206,7 +209,7 @@ __global__ void renderCUDA(
 	const float4* __restrict__ conic_opacity,
 	render_load_info info,
 	float3 bg_color,
-	uchar3* __restrict__ out_color)
+	uchar3* __restrict__ out_color, float* __restrict__ out_depth)
 {
 	int2 range = ranges[blockIdx.y * x_blocks + blockIdx.x];
 	int lane = threadIdx.y * blockDim.x + threadIdx.x;
@@ -251,7 +254,7 @@ __global__ void renderCUDA(
 		}
 	}
 
-	float3 C[THREAD_Y][THREAD_X];
+	float4 C[THREAD_Y][THREAD_X];
 #pragma unroll
 	for (int i = 0; i < THREAD_Y; i++)
 	{
@@ -267,7 +270,7 @@ __global__ void renderCUDA(
 	{
 		int offset;
 		float2 xy;
-		float3 rgb;
+		float4 rgbd;
 		float4 con_o;
 		if (lane == 0)
 		{
@@ -355,7 +358,7 @@ __global__ void renderCUDA(
 #endif
 			}
 
-			get_gaussian_features(xy, rgb, con_o, buf, 0);
+			get_gaussian_features(xy, rgbd, con_o, buf, 0);
 #ifdef _DEBUG
 			if (lane == 3 && xy.x != points_xy[point_list[point_id + 0]].x)
 			{
@@ -369,11 +372,11 @@ __global__ void renderCUDA(
 	#pragma unroll
 				for (int j = 0; j < THREAD_X; j++)
 				{
-					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgb);
+					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
 				}
 			}
 
-			get_gaussian_features(xy, rgb, con_o, buf, 4);
+			get_gaussian_features(xy, rgbd, con_o, buf, 4);
 #ifdef _DEBUG
 			if (lane == 3 && xy.x != points_xy[point_list[point_id + 1]].x)
 			{
@@ -387,7 +390,7 @@ __global__ void renderCUDA(
 	#pragma unroll
 				for (int j = 0; j < THREAD_X; j++)
 				{
-					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgb);
+					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
 				}
 			}
 
@@ -465,7 +468,7 @@ __global__ void renderCUDA(
 #endif
 			}
 
-			get_gaussian_features(xy, rgb, con_o, buf, 0);
+			get_gaussian_features(xy, rgbd, con_o, buf, 0);
 #ifdef _DEBUG
 			if (lane == 3 && xy.x != points_xy[point_list[point_id + 0]].x)
 			{
@@ -479,14 +482,14 @@ __global__ void renderCUDA(
 #pragma unroll
 				for (int j = 0; j < THREAD_X; j++)
 				{
-					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgb);
+					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
 				}
 			}
 
 			if (point_id + 1 >= range.y)
 				break;
 
-			get_gaussian_features(xy, rgb, con_o, buf, 4);
+			get_gaussian_features(xy, rgbd, con_o, buf, 4);
 #ifdef _DEBUG
 			if (lane == 3 && xy.x != points_xy[point_list[point_id + 1]].x)
 			{
@@ -500,7 +503,7 @@ __global__ void renderCUDA(
 #pragma unroll
 				for (int j = 0; j < THREAD_X; j++)
 				{
-					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgb);
+					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
 				}
 			}
 
@@ -523,7 +526,7 @@ __global__ void renderCUDA(
 #pragma unroll
 			for (int j = 0; j < THREAD_X; j++)
 			{
-				write_color(out_color, bg_color, pix[i][j], width, height, C[i][j], T[i][j]);
+				write_color(out_color, out_depth, bg_color, pix[i][j], width, height, C[i][j], T[i][j]);
 			}
 		}
 	}
@@ -551,7 +554,7 @@ void render(int num_rendered,
 	int width, int height,
 	float2* points_xy, float4* rgb_depth, float4* conic_opacity,
 	uint64_t* gaussian_keys_sorted, uint32_t* gaussian_values_sorted,
-	int2* ranges, float3 bg_color, uchar3* out_color, cudaStream_t stream)
+	int2* ranges, float3 bg_color, uchar3* out_color, float* out_depth, cudaStream_t stream)
 {
 	dim3 grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
 	cudaMemsetAsync(ranges, 0, sizeof(int2) * grid.x * grid.y, stream);
@@ -572,7 +575,7 @@ void render(int num_rendered,
         conic_opacity,
         render_load_info(gaussian_values_sorted, points_xy, rgb_depth, conic_opacity),
         bg_color,
-        out_color);
+        out_color, out_depth);
 }
 
 } // namespace
@@ -581,30 +584,30 @@ void render_16x16(int num_rendered,
 	int width, int height,
 	float2* points_xy, float4* rgb_depth, float4* conic_opacity,
 	uint64_t* gaussian_keys_sorted, uint32_t* gaussian_values_sorted,
-	int2* ranges, float3 bg_color, uchar3* out_color, cudaStream_t stream)
+	int2* ranges, float3 bg_color, uchar3* out_color, float* out_depth, cudaStream_t stream)
 {
     render<16, 16>(num_rendered, width, height, points_xy, rgb_depth, conic_opacity,
-	    gaussian_keys_sorted, gaussian_values_sorted, ranges, bg_color, out_color, stream);
+	    gaussian_keys_sorted, gaussian_values_sorted, ranges, bg_color, out_color, out_depth, stream);
 }
 
 void render_32x16(int num_rendered,
 	int width, int height,
 	float2* points_xy, float4* rgb_depth, float4* conic_opacity,
 	uint64_t* gaussian_keys_sorted, uint32_t* gaussian_values_sorted,
-	int2* ranges, float3 bg_color, uchar3* out_color, cudaStream_t stream)
+	int2* ranges, float3 bg_color, uchar3* out_color, float* out_depth, cudaStream_t stream)
 {
     render<32, 16>(num_rendered, width, height, points_xy, rgb_depth, conic_opacity,
-	    gaussian_keys_sorted, gaussian_values_sorted, ranges, bg_color, out_color, stream);
+	    gaussian_keys_sorted, gaussian_values_sorted, ranges, bg_color, out_color, out_depth, stream);
 }
 
 void render_32x32(int num_rendered,
 	int width, int height,
 	float2* points_xy, float4* rgb_depth, float4* conic_opacity,
 	uint64_t* gaussian_keys_sorted, uint32_t* gaussian_values_sorted,
-	int2* ranges, float3 bg_color, uchar3* out_color, cudaStream_t stream)
+	int2* ranges, float3 bg_color, uchar3* out_color, float* out_depth, cudaStream_t stream)
 {
     render<32, 32>(num_rendered, width, height, points_xy, rgb_depth, conic_opacity,
-	    gaussian_keys_sorted, gaussian_values_sorted, ranges, bg_color, out_color, stream);
+	    gaussian_keys_sorted, gaussian_values_sorted, ranges, bg_color, out_color, out_depth, stream);
 }
 
 } // namespace flashgs
