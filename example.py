@@ -6,6 +6,8 @@ import sys
 import json
 import time
 
+from typing import Optional
+
 
 class Scene:
     def __init__(self, device):
@@ -64,7 +66,7 @@ class Rasterizer:
         self.conic_opacity = torch.zeros((scene.num_vertex, 4), device=scene.device, dtype=torch.float32)
 
     # 前向传播（应用层封装）
-    def forward(self, scene, camera, bg_color):
+    def forward(self, scene, camera, bg_color, mask):
         # 属性预处理 + 键值绑定
         self.curr_offset.fill_(0)
         flash_gaussian_splatting.ops.preprocess(scene.position, scene.shs, scene.opacity, scene.cov3d,
@@ -87,10 +89,11 @@ class Rasterizer:
                                                    self.gaussian_keys_sorted, self.gaussian_values_sorted)
         # 排序 + 像素着色 + 混色阶段
         out_color = torch.zeros((camera.height, camera.width, 3), device=scene.device, dtype=torch.int8)
+        out_depth = torch.zeros((camera.height, camera.width, 1), device=scene.device, dtype=torch.float32)        
         flash_gaussian_splatting.ops.render_16x16(num_rendered, camera.width, camera.height,
                                                   self.points_xy, self.rgb_depth, self.conic_opacity,
                                                   self.gaussian_keys_sorted, self.gaussian_values_sorted,
-                                                  self.ranges, bg_color, out_color)
+                                                  self.ranges, bg_color, out_color, out_depth, mask)
         return out_color
 
 
@@ -102,7 +105,7 @@ def savePpm(image, path):
         f.write(b'P6\n' + f'{image.size(1)} {image.size(0)}\n255\n'.encode() + image.numpy().tobytes())
 
 
-def render_scene(model_path, test_performance=False):
+def render_scene(model_path, mask, test_performance=False):
     scene_path = os.path.join(model_path, "point_cloud", "iteration_30000", "point_cloud.ply")
     print(scene_path)
     camera_path = os.path.join(model_path, "cameras.json")
@@ -127,14 +130,14 @@ def render_scene(model_path, test_performance=False):
         camera = Camera(camera_json)
         print("image name = %s" % camera.img_name)
 
-        image = rasterizer.forward(scene, camera, bg_color)  # warm up
+        image = rasterizer.forward(scene, camera, bg_color, mask)  # warm up
 
         if test_performance:
             n = 10
             torch.cuda.synchronize()
             t0 = time.time()
             for _ in range(n):
-                image = rasterizer.forward(scene, camera, bg_color)  # test performance
+                image = rasterizer.forward(scene, camera, bg_color, mask)  # test performance
             torch.cuda.synchronize()
             t1 = time.time()
             print("elapsed time = %f ms" % ((t1 - t0) / n * 1000))
@@ -145,9 +148,13 @@ def render_scene(model_path, test_performance=False):
 
 
 if __name__ == "__main__":
+    # python example.py /n/holylfs05/LABS/pfister_lab/Lab/coxfs01/pfister_lab2/Lab/freeman/saccadenet-3dgs/output_SparseGS/test_r1
+    # mask = torch.ones((1263, 710), device="cuda").bool()
+    mask = (torch.rand((1263, 710), device="cuda") > 0.9).bool()
+
     if len(sys.argv) >= 2:
         model_path = sys.argv[1]
-        render_scene(model_path, True)
+        render_scene(model_path, mask, True)
     else:
         models_path = "D:\\models"  # https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/datasets/pretrained/models.zip
         for entry in os.scandir(models_path):

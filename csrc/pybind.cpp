@@ -172,7 +172,8 @@ void render_16x16_torch(int num_rendered,
 	torch::Tensor& points_xy, torch::Tensor& rgb_depth, torch::Tensor& conic_opacity,
 	torch::Tensor& gaussian_keys_sorted, torch::Tensor& gaussian_values_sorted,
     torch::Tensor& ranges,
-	torch::Tensor& bg_color, torch::Tensor& out_color, torch::Tensor& out_depth)
+	torch::Tensor& bg_color, torch::Tensor& out_color, torch::Tensor& out_depth,
+    torch::Tensor& mask)
 {
     auto bg_color_data = bg_color.contiguous().data_ptr<float>();
     render_16x16(num_rendered,
@@ -184,7 +185,8 @@ void render_16x16_torch(int num_rendered,
         (uint32_t*)gaussian_values_sorted.contiguous().data_ptr<int>(),
         (int2*)ranges.contiguous().data_ptr<int>(),
         float3{bg_color_data[0], bg_color_data[1], bg_color_data[2]},
-        (uchar3*)out_color.data_ptr(), (float*)out_depth.data_ptr());
+        (uchar3*)out_color.data_ptr(), (float*)out_depth.data_ptr(),
+        (bool*)mask.data_ptr());
 }
 
 void render_32x16_torch(int num_rendered,

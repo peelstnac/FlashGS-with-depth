@@ -50,7 +50,7 @@ void render_16x16(int num_rendered,
 	int width, int height,
 	float2* points_xy, float4* rgb_depth, float4* conic_opacity,
 	uint64_t* gaussian_keys_sorted, uint32_t* gaussian_values_sorted,
-	int2* ranges, float3 bg_color, uchar3* out_color, float* out_depth, cudaStream_t stream = 0);
+	int2* ranges, float3 bg_color, uchar3* out_color, float* out_depth, bool* mask, cudaStream_t stream = 0);
 
 void render_32x16(int num_rendered,
 	int width, int height,
