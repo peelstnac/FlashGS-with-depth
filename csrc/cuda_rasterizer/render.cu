@@ -256,15 +256,22 @@ __global__ void renderCUDA(
 	}	
 
 	float T[THREAD_Y][THREAD_X];
+
+	// check to skip an entire block
+	bool local_tile_empty = true;
 #pragma unroll
 	for (int i = 0; i < THREAD_Y; i++)
 	{
 #pragma unroll
 		for (int j = 0; j < THREAD_X; j++)
 		{
-			T[i][j] = 1.0f;
+			T[i][j] = mask[pix_id[i][j]];
+			local_tile_empty = !mask[pix_id[i][j]];
 		}
 	}
+
+	bool tile_empty = __all_sync(~0, local_tile_empty);
+	if (tile_empty) return;
 
 	float4 C[THREAD_Y][THREAD_X];
 #pragma unroll
@@ -384,7 +391,7 @@ __global__ void renderCUDA(
 	#pragma unroll
 				for (int j = 0; j < THREAD_X; j++)
 				{
-					if (mask[pix_id[i][j]])
+					// if (mask[pix_id[i][j]])
 						pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
 				}
 			}
@@ -403,7 +410,7 @@ __global__ void renderCUDA(
 	#pragma unroll
 				for (int j = 0; j < THREAD_X; j++)
 				{
-					if (mask[pix_id[i][j]])
+					// if (mask[pix_id[i][j]])
 						pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
 				}
 			}
@@ -496,7 +503,7 @@ __global__ void renderCUDA(
 #pragma unroll
 				for (int j = 0; j < THREAD_X; j++)
 				{
-					if (mask[pix_id[i][j]])
+					// if (mask[pix_id[i][j]])
 						pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
 				}
 			}
@@ -518,7 +525,7 @@ __global__ void renderCUDA(
 #pragma unroll
 				for (int j = 0; j < THREAD_X; j++)
 				{
-					if (mask[pix_id[i][j]])
+					// if (mask[pix_id[i][j]])
 						pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
 				}
 			}
