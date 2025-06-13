@@ -150,7 +150,10 @@ def render_scene(model_path, mask, test_performance=False):
 if __name__ == "__main__":
     # python example.py /n/holylfs05/LABS/pfister_lab/Lab/coxfs01/pfister_lab2/Lab/freeman/saccadenet-3dgs/output_SparseGS/test_r1
     # mask = torch.ones((1263, 710), device="cuda").bool()
-    mask = (torch.rand((1263, 710), device="cuda") > 0.9).bool()
+    # mask = (torch.rand((1263, 710), device="cuda") > 0.8).bool()
+    # mask[1000:] = False
+    id_map = torch.load("id_map.pt")
+    mask = id_map.sum(dim=-1) > 0
 
     if len(sys.argv) >= 2:
         model_path = sys.argv[1]
