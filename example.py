@@ -152,7 +152,7 @@ if __name__ == "__main__":
     # mask = torch.ones((1263, 710), device="cuda").bool()
     # mask = (torch.rand((1263, 710), device="cuda") > 0.8).bool()
     # mask[1000:] = False
-    id_map = torch.load("id_map.pt")
+    id_map = torch.load("id_map_new.pt").cuda()
     mask = id_map.sum(dim=-1) > 0
 
     if len(sys.argv) >= 2:

@@ -266,7 +266,7 @@ __global__ void renderCUDA(
 		for (int j = 0; j < THREAD_X; j++)
 		{
 			T[i][j] = mask[pix_id[i][j]];
-			local_tile_empty = !mask[pix_id[i][j]];
+			local_tile_empty = local_tile_empty && !mask[pix_id[i][j]];
 		}
 	}
 
