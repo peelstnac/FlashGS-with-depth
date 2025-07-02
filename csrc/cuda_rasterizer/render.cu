@@ -287,7 +287,7 @@ __global__ void renderCUDA(
 	int point_id = range.x;
 	if (point_id < range.y)
 	{
-		int offset;
+		int offset = -1;
 		float2 xy;
 		float4 rgbd;
 		float4 con_o;
@@ -309,7 +309,7 @@ __global__ void renderCUDA(
 		}
 		const float* ptr = reinterpret_cast<const float*>(reinterpret_cast<const char*>(data) + ((int64_t)offset << lg2_scale));
 		float buf;
-		bool load_enable = data != nullptr;
+		bool load_enable = data != nullptr && offset >= 0; // $test
 		if (lane == 0)
 		{
 			load_enable = load_enable && point_id + 2 < range.y;
@@ -331,7 +331,7 @@ __global__ void renderCUDA(
 			buf = __ldg(ptr); // 0: point_list[point_id + 2], 4: point_list[point_id + 3], 8: features[point_list[point_id + 0]], 12: features[point_list[point_id + 1]]
 		}
 
-		load_enable = data != nullptr;
+		load_enable = data != nullptr && offset >= 0; // $test
 
 		bool done = false;
 		while (__any_sync(~0, point_id + 5 < range.y && !done))
@@ -555,6 +555,7 @@ __global__ void renderCUDA(
 	}
 	else
 	{
+		int size = width * height; // $test
 #pragma unroll
 		for (int i = 0; i < THREAD_Y; i++)
 		{
@@ -564,9 +565,16 @@ __global__ void renderCUDA(
 				int pix_x = blockIdx.x * BLOCK_X + threadIdx.x * THREAD_X + j;
 				int pix_y = blockIdx.y * BLOCK_Y + threadIdx.y * THREAD_Y + i;
 				int pix_id = width * pix_y + pix_x;
-				out_color[pix_id].x = encode(bg_color.x);
-				out_color[pix_id].y = encode(bg_color.y);
-				out_color[pix_id].z = encode(bg_color.z);
+
+				if(pix_id < size)   // $test
+                {
+                    out_color[pix_id].x = encode(bg_color.x);
+                    out_color[pix_id].y = encode(bg_color.y);
+                    out_color[pix_id].z = encode(bg_color.z);
+                }
+				// out_color[pix_id].x = encode(bg_color.x);
+				// out_color[pix_id].y = encode(bg_color.y);
+				// out_color[pix_id].z = encode(bg_color.z);
 			}
 		}
 	}
