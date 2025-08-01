@@ -74,6 +74,25 @@ __forceinline__ __device__ uint8_t write_color(uchar3* __restrict__ out_color, f
 	}
 }
 
+__forceinline__ __device__ uint8_t write_color_compressed(uchar3* __restrict__ out_color, float* __restrict__ out_depth,
+	float3 bg_color, int2 pix, int pix_compressed, int width, int height, float4 C, float T)
+{
+	if (pix.x < width && pix.y < height)
+	{
+		out_depth[width * pix.y + pix.x]   = C.w;  // no bg color for depth
+	}
+
+	if (pix_compressed > -1) {
+		if (T < 0.0001f)
+		{
+			T = 0.0f;
+		}
+		out_color[pix_compressed].x = encode(C.x + T * bg_color.x);
+		out_color[pix_compressed].y = encode(C.y + T * bg_color.y);
+		out_color[pix_compressed].z = encode(C.z + T * bg_color.z);
+	}
+}
+
 struct render_load_info
 {
 	const void* data[FLASHGS_WARP_SIZE] = { nullptr };
@@ -210,8 +229,8 @@ __global__ void renderCUDA(
 	render_load_info info,
 	float3 bg_color,
 	uchar3* __restrict__ out_color, float* __restrict__ out_depth,
-	bool* __restrict__ mask)
-{
+	const int32_t* __restrict__ id_map)
+{	
 	int2 range = ranges[blockIdx.y * x_blocks + blockIdx.x];
 	int lane = threadIdx.y * blockDim.x + threadIdx.x;
 	const void* data = info.data[lane];
@@ -265,8 +284,8 @@ __global__ void renderCUDA(
 #pragma unroll
 		for (int j = 0; j < THREAD_X; j++)
 		{
-			T[i][j] = mask[pix_id[i][j]];
-			local_tile_empty = local_tile_empty && !mask[pix_id[i][j]];
+			T[i][j] = ((id_map[pix_id[i][j]] > -1) ? 1.0 : 0.0);
+			local_tile_empty = local_tile_empty && !(id_map[pix_id[i][j]] > -1);
 		}
 	}
 
@@ -391,8 +410,7 @@ __global__ void renderCUDA(
 	#pragma unroll
 				for (int j = 0; j < THREAD_X; j++)
 				{
-					// if (mask[pix_id[i][j]])
-						pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
+					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
 				}
 			}
 
@@ -410,8 +428,7 @@ __global__ void renderCUDA(
 	#pragma unroll
 				for (int j = 0; j < THREAD_X; j++)
 				{
-					// if (mask[pix_id[i][j]])
-						pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
+					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
 				}
 			}
 
@@ -503,8 +520,7 @@ __global__ void renderCUDA(
 #pragma unroll
 				for (int j = 0; j < THREAD_X; j++)
 				{
-					// if (mask[pix_id[i][j]])
-						pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
+					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
 				}
 			}
 
@@ -525,8 +541,7 @@ __global__ void renderCUDA(
 #pragma unroll
 				for (int j = 0; j < THREAD_X; j++)
 				{
-					// if (mask[pix_id[i][j]])
-						pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
+					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
 				}
 			}
 
@@ -580,12 +595,394 @@ __global__ void renderCUDA(
 	}
 }
 
+
+// make sure id_map is one-to-one
+template<int BLOCK_X, int BLOCK_Y, int THREAD_X, int THREAD_Y>
+__global__ void renderCUDACompressed(
+	const int2* __restrict__ ranges,
+	const uint32_t* __restrict__ point_list,
+	int width, int height, int x_blocks,
+	const float2* __restrict__ points_xy,
+	const float4* __restrict__ rgb_depth,
+	const float4* __restrict__ conic_opacity,
+	render_load_info info,
+	float3 bg_color,
+	uchar3* __restrict__ out_color, float* __restrict__ out_depth,
+	const int32_t* __restrict__ id_map)
+{	
+	int2 range = ranges[blockIdx.y * x_blocks + blockIdx.x];
+	int lane = threadIdx.y * blockDim.x + threadIdx.x;
+	const void* data = info.data[lane];
+	int lg2_scale = info.lg2_scale[lane];
+
+	// uint2 pix = { blockIdx.x * BLOCK_X + threadIdx.x, blockIdx.y * BLOCK_Y + threadIdx.y };
+	int2 pix[THREAD_Y][THREAD_X];
+#pragma unroll
+	for (int i = 0; i < THREAD_Y; i++)
+	{
+#pragma unroll
+		for (int j = 0; j < THREAD_X; j++)
+		{
+			pix[i][j] = {
+				(int)blockIdx.x * BLOCK_X + (int)threadIdx.x * THREAD_X + j,
+				(int)blockIdx.y * BLOCK_Y + (int)threadIdx.y * THREAD_Y + i
+			};
+		}
+	}
+
+	// float2 pixf = { (float)pix.x, (float)pix.y };
+	float2 pixf[THREAD_Y][THREAD_X];
+#pragma unroll
+	for (int i = 0; i < THREAD_Y; i++)
+	{
+#pragma unroll
+		for (int j = 0; j < THREAD_X; j++)
+		{
+			pixf[i][j] = { (float)pix[i][j].x, (float)pix[i][j].y };
+		}
+	}
+
+	int pix_id[THREAD_Y][THREAD_X];
+#pragma unroll
+	for (int i = 0; i < THREAD_Y; i++)
+	{
+#pragma unroll
+		for (int j = 0; j < THREAD_X; j++)
+		{
+			pix_id[i][j] = pix[i][j].y * width + pix[i][j].x;
+		}
+	}	
+
+	float T[THREAD_Y][THREAD_X];
+
+	// check to skip an entire block
+	bool local_tile_empty = true;
+#pragma unroll
+	for (int i = 0; i < THREAD_Y; i++)
+	{
+#pragma unroll
+		for (int j = 0; j < THREAD_X; j++)
+		{
+			T[i][j] = ((id_map[pix_id[i][j]] > -1) ? 1.0 : 0.0);
+			local_tile_empty = local_tile_empty && !(id_map[pix_id[i][j]] > -1);
+		}
+	}
+
+	bool tile_empty = __all_sync(~0, local_tile_empty);
+	if (tile_empty) return;
+
+	float4 C[THREAD_Y][THREAD_X];
+#pragma unroll
+	for (int i = 0; i < THREAD_Y; i++)
+	{
+#pragma unroll
+		for (int j = 0; j < THREAD_X; j++)
+		{
+			C[i][j] = { 0.0f, 0.0f, 0.0f };
+		}
+	}
+
+	int point_id = range.x;
+	if (point_id < range.y)
+	{
+		int offset = -1;
+		float2 xy;
+		float4 rgbd;
+		float4 con_o;
+		if (lane == 0)
+		{
+			offset = point_id + 2;
+		}
+		else if (lane == 4)
+		{
+			offset = point_id + 3;
+		}
+		else if ((lane & 4) == 0 && point_id + 1 < range.y)
+		{
+			offset = point_list[point_id + 0];
+		}
+		else if (point_id + 2 < range.y)
+		{
+			offset = point_list[point_id + 1];
+		}
+		const float* ptr = reinterpret_cast<const float*>(reinterpret_cast<const char*>(data) + ((int64_t)offset << lg2_scale));
+		float buf;
+		bool load_enable = data != nullptr && offset >= 0; // $test
+		if (lane == 0)
+		{
+			load_enable = load_enable && point_id + 2 < range.y;
+		}
+		else if (lane == 4)
+		{
+			load_enable = load_enable && point_id + 3 < range.y;
+		}
+		else if ((lane & 4) == 0)
+		{
+			load_enable = load_enable && point_id + 0 < range.y;
+		}
+		else
+		{
+			load_enable = load_enable && point_id + 1 < range.y;
+		}
+		if (load_enable)
+		{
+			buf = __ldg(ptr); // 0: point_list[point_id + 2], 4: point_list[point_id + 3], 8: features[point_list[point_id + 0]], 12: features[point_list[point_id + 1]]
+		}
+
+		load_enable = data != nullptr && offset >= 0; // $test
+
+		bool done = false;
+		while (__any_sync(~0, point_id + 5 < range.y && !done))
+		{
+			offset = __shfl_sync(~0, __float_as_uint(buf), lane & 4);
+			if (lane == 0)
+			{
+				offset = point_id + 4;
+			}
+			if (lane == 4)
+			{
+				offset = point_id + 5;
+			}
+
+#ifdef _DEBUG
+			if (lane == 0)
+			{
+				printf("point_id = %d\n", point_id);
+			}
+#endif
+			float ldg_buf;
+			ptr = reinterpret_cast<const float*>(reinterpret_cast<const char*>(data) + ((int64_t)offset << lg2_scale));
+			if (load_enable)
+			{
+				ldg_buf = __ldg(ptr); // 0: point_list[point_id + 4], 4: point_list[point_id + 5], 8: features[point_list[point_id + 2]], 12: features[point_list[point_id + 3]]
+#ifdef _DEBUG
+				if (lane == 0 && __float_as_int(ldg_buf) != point_list[point_id + 4])
+				{
+					printf("error1\n");
+				}
+				else if (lane == 4 && __float_as_int(ldg_buf) != point_list[point_id + 5])
+				{
+					printf("error2\n");
+				}
+				else if (lane == 8 && ldg_buf != points_xy[point_list[point_id + 2]].x)
+				{
+					printf("error3\n");
+				}
+				else if (lane == 12 && ldg_buf != points_xy[point_list[point_id + 3]].x)
+				{
+					printf("error4\n");
+				}
+#endif
+			}
+
+			get_gaussian_features(xy, rgbd, con_o, buf, 0);
+#ifdef _DEBUG
+			if (lane == 3 && xy.x != points_xy[point_list[point_id + 0]].x)
+			{
+				printf("error5\n");
+			}
+#endif
+
+	#pragma unroll
+			for (int i = 0; i < THREAD_Y; i++)
+			{
+	#pragma unroll
+				for (int j = 0; j < THREAD_X; j++)
+				{
+					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
+				}
+			}
+
+			get_gaussian_features(xy, rgbd, con_o, buf, 4);
+#ifdef _DEBUG
+			if (lane == 3 && xy.x != points_xy[point_list[point_id + 1]].x)
+			{
+				printf("error6\n");
+			}
+#endif
+
+	#pragma unroll
+			for (int i = 0; i < THREAD_Y; i++)
+			{
+	#pragma unroll
+				for (int j = 0; j < THREAD_X; j++)
+				{
+					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
+				}
+			}
+
+			done = true;
+	#pragma unroll
+			for (int i = 0; i < THREAD_Y; i++)
+			{
+	#pragma unroll
+				for (int j = 0; j < THREAD_X; j++)
+				{
+					done = done && T[i][j] < 0.0001f;
+				}
+			}
+
+			point_id += 2;
+			buf = ldg_buf;
+		}
+		while (__any_sync(~0, point_id < range.y && !done))
+		{
+			offset = __shfl_sync(~0, __float_as_uint(buf), lane & 4);
+			if (lane == 0)
+			{
+				offset = point_id + 4;
+			}
+			if (lane == 4)
+			{
+				offset = point_id + 5;
+			}
+
+			if (lane == 0)
+			{
+				load_enable = load_enable && point_id + 4 < range.y;
+			}
+			else if (lane == 4)
+			{
+				load_enable = load_enable && point_id + 5 < range.y;
+			}
+			else if ((lane & 4) == 0)
+			{
+				load_enable = load_enable && point_id + 2 < range.y;
+			}
+			else
+			{
+				load_enable = load_enable && point_id + 3 < range.y;
+			}
+
+#ifdef _DEBUG
+			if (lane == 0)
+			{
+				printf("point_id = %d\n", point_id);
+			}
+#endif
+			float ldg_buf;
+			ptr = reinterpret_cast<const float*>(reinterpret_cast<const char*>(data) + ((int64_t)offset << lg2_scale));
+			if (load_enable)
+			{
+				ldg_buf = __ldg(ptr); // 0: point_list[point_id + 4], 4: point_list[point_id + 5], 8: features[point_list[point_id + 2]], 12: features[point_list[point_id + 3]]
+#ifdef _DEBUG
+				if (lane == 0 && __float_as_int(ldg_buf) != point_list[point_id + 4])
+				{
+					printf("error1\n");
+				}
+				else if (lane == 4 && __float_as_int(ldg_buf) != point_list[point_id + 5])
+				{
+					printf("error2\n");
+				}
+				else if (lane == 8 && ldg_buf != points_xy[point_list[point_id + 2]].x)
+				{
+					printf("error3\n");
+				}
+				else if (lane == 12 && ldg_buf != points_xy[point_list[point_id + 3]].x)
+				{
+					printf("error4\n");
+				}
+#endif
+			}
+
+			get_gaussian_features(xy, rgbd, con_o, buf, 0);
+#ifdef _DEBUG
+			if (lane == 3 && xy.x != points_xy[point_list[point_id + 0]].x)
+			{
+				printf("error5\n");
+			}
+#endif
+
+#pragma unroll
+			for (int i = 0; i < THREAD_Y; i++)
+			{
+#pragma unroll
+				for (int j = 0; j < THREAD_X; j++)
+				{
+					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
+				}
+			}
+
+			if (point_id + 1 >= range.y)
+				break;
+
+			get_gaussian_features(xy, rgbd, con_o, buf, 4);
+#ifdef _DEBUG
+			if (lane == 3 && xy.x != points_xy[point_list[point_id + 1]].x)
+			{
+				printf("error6\n");
+			}
+#endif
+
+#pragma unroll
+			for (int i = 0; i < THREAD_Y; i++)
+			{
+#pragma unroll
+				for (int j = 0; j < THREAD_X; j++)
+				{
+					pixel_shader(C[i][j], T[i][j], pixf[i][j], xy, con_o, rgbd);
+				}
+			}
+
+			done = true;
+#pragma unroll
+			for (int i = 0; i < THREAD_Y; i++)
+			{
+#pragma unroll
+				for (int j = 0; j < THREAD_X; j++)
+				{
+					done = done && T[i][j] < 0.0001f;
+				}
+			}
+			point_id += 2;
+			buf = ldg_buf;
+		}
+#pragma unroll
+		for (int i = 0; i < THREAD_Y; i++)
+		{
+#pragma unroll
+			for (int j = 0; j < THREAD_X; j++)
+			{
+				write_color_compressed(out_color, out_depth, bg_color, pix[i][j], id_map[pix_id[i][j]], width, height, C[i][j], T[i][j]);
+			}
+		}
+	}
+	else
+	{
+		int size = width * height; // $test
+#pragma unroll
+		for (int i = 0; i < THREAD_Y; i++)
+		{
+#pragma unroll
+			for (int j = 0; j < THREAD_X; j++)
+			{
+				int pix_x = blockIdx.x * BLOCK_X + threadIdx.x * THREAD_X + j;
+				int pix_y = blockIdx.y * BLOCK_Y + threadIdx.y * THREAD_Y + i;
+				int pix_id = id_map[width * pix_y + pix_x];
+
+				if(pix_id > -1)   // $test
+                {
+                    out_color[pix_id].x = encode(bg_color.x);
+                    out_color[pix_id].y = encode(bg_color.y);
+                    out_color[pix_id].z = encode(bg_color.z);
+                }
+				// out_color[pix_id].x = encode(bg_color.x);
+				// out_color[pix_id].y = encode(bg_color.y);
+				// out_color[pix_id].z = encode(bg_color.z);
+			}
+		}
+	}
+}
+
+
 template<int BLOCK_X, int BLOCK_Y>
 void render(int num_rendered,
 	int width, int height,
 	float2* points_xy, float4* rgb_depth, float4* conic_opacity,
 	uint64_t* gaussian_keys_sorted, uint32_t* gaussian_values_sorted,
-	int2* ranges, float3 bg_color, uchar3* out_color, float* out_depth, bool* mask, cudaStream_t stream)
+	int2* ranges, float3 bg_color, uchar3* out_color, float* out_depth, 
+	int32_t* id_map, bool visualize,
+	cudaStream_t stream)
 {
 	dim3 grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
 	cudaMemsetAsync(ranges, 0, sizeof(int2) * grid.x * grid.y, stream);
@@ -597,17 +994,32 @@ void render(int num_rendered,
         ranges);
 
     // Let each tile blend its range of Gaussians independently in parallel
-    renderCUDA<BLOCK_X, BLOCK_Y, BLOCK_X / 8, BLOCK_Y / 4><<<grid, dim3(8, 4, 1), 0, stream>>>(
-        ranges,
-        gaussian_values_sorted,
-        width, height, grid.x,
-        points_xy,
-        rgb_depth,
-        conic_opacity,
-        render_load_info(gaussian_values_sorted, points_xy, rgb_depth, conic_opacity),
-        bg_color,
-        out_color, out_depth,
-		mask);
+
+	if (visualize) {
+		renderCUDA<BLOCK_X, BLOCK_Y, BLOCK_X / 8, BLOCK_Y / 4><<<grid, dim3(8, 4, 1), 0, stream>>>(
+			ranges,
+			gaussian_values_sorted,
+			width, height, grid.x,
+			points_xy,
+			rgb_depth,
+			conic_opacity,
+			render_load_info(gaussian_values_sorted, points_xy, rgb_depth, conic_opacity),
+			bg_color,
+			out_color, out_depth,
+			id_map);
+	} else {
+		renderCUDACompressed<BLOCK_X, BLOCK_Y, BLOCK_X / 8, BLOCK_Y / 4><<<grid, dim3(8, 4, 1), 0, stream>>>(
+			ranges,
+			gaussian_values_sorted,
+			width, height, grid.x,
+			points_xy,
+			rgb_depth,
+			conic_opacity,
+			render_load_info(gaussian_values_sorted, points_xy, rgb_depth, conic_opacity),
+			bg_color,
+			out_color, out_depth,
+			id_map);
+	}
 }
 
 } // namespace
@@ -616,10 +1028,14 @@ void render_16x16(int num_rendered,
 	int width, int height,
 	float2* points_xy, float4* rgb_depth, float4* conic_opacity,
 	uint64_t* gaussian_keys_sorted, uint32_t* gaussian_values_sorted,
-	int2* ranges, float3 bg_color, uchar3* out_color, float* out_depth, bool* mask, cudaStream_t stream)
+	int2* ranges, float3 bg_color, uchar3* out_color, float* out_depth,
+	int32_t* id_map, bool visualize,
+	cudaStream_t stream)
 {
     render<16, 16>(num_rendered, width, height, points_xy, rgb_depth, conic_opacity,
-	    gaussian_keys_sorted, gaussian_values_sorted, ranges, bg_color, out_color, out_depth, mask, stream);
+	    gaussian_keys_sorted, gaussian_values_sorted, ranges, bg_color, out_color, out_depth, 
+		id_map, visualize,
+		stream);
 }
 
 void render_32x16(int num_rendered,
